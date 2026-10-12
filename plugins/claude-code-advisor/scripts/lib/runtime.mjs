@@ -16,6 +16,105 @@ function readToolsForMode(mode, allowWeb = false) {
   return LOCAL_READ_TOOLS;
 }
 
+export const COMPANION_PERMISSION_MODES = ["default", "acceptEdits", "dontAsk"];
+
+export function normalizePermissionMode(raw) {
+  const value = String(raw ?? "").trim();
+  const lowered = value.toLowerCase();
+  if (lowered === "bypasspermissions") {
+    throw new Error(
+      `--permission-mode bypassPermissions is not allowed. Use one of: ${COMPANION_PERMISSION_MODES.join(", ")}.`
+    );
+  }
+  const mode = COMPANION_PERMISSION_MODES.find((candidate) => candidate.toLowerCase() === lowered);
+  if (!mode) {
+    throw new Error(
+      `Unsupported --permission-mode value: ${value || "(empty)"}. Use one of: ${COMPANION_PERMISSION_MODES.join(", ")}.`
+    );
+  }
+  return mode;
+}
+
+function normalizeToolRules(rules, flagName) {
+  const normalized = [];
+  for (const rule of rules || []) {
+    const trimmed = String(rule ?? "").trim();
+    if (!trimmed) {
+      throw new Error(`--${flagName} requires a non-empty tool rule.`);
+    }
+    if (!normalized.includes(trimmed)) {
+      normalized.push(trimmed);
+    }
+  }
+  return normalized;
+}
+
+export function normalizePermissionConfig(
+  { write = false, mode = null, addDirs = [], allowedTools = [], disallowedTools = [] } = {},
+  baseDir = process.cwd()
+) {
+  const hasExplicit =
+    mode != null ||
+    (addDirs || []).length > 0 ||
+    (allowedTools || []).length > 0 ||
+    (disallowedTools || []).length > 0;
+  if (!hasExplicit) {
+    return null;
+  }
+  if (!write) {
+    throw new Error(
+      "Explicit permission options (--permission-mode, --add-dir, --allowed-tools, --disallowed-tools) require --write. Read-only runs stay on plan mode with restricted tools."
+    );
+  }
+  const resolvedDirs = [];
+  for (const dir of addDirs || []) {
+    const trimmed = String(dir ?? "").trim();
+    if (!trimmed) {
+      throw new Error("--add-dir requires a non-empty directory path.");
+    }
+    const resolved = path.resolve(baseDir, trimmed);
+    if (!resolvedDirs.includes(resolved)) {
+      resolvedDirs.push(resolved);
+    }
+  }
+  const allowed = normalizeToolRules(allowedTools, "allowed-tools");
+  const disallowed = normalizeToolRules(disallowedTools, "disallowed-tools");
+  const conflict = allowed.find((rule) => disallowed.includes(rule));
+  if (conflict) {
+    throw new Error(
+      `Conflicting permission grant: ${conflict} appears in both --allowed-tools and --disallowed-tools.`
+    );
+  }
+  return {
+    mode: normalizePermissionMode(mode == null ? "default" : mode),
+    addDirs: resolvedDirs,
+    allowedTools: allowed,
+    disallowedTools: disallowed
+  };
+}
+
+function appendPermissionArgs(args, write, permissionConfig) {
+  if (!permissionConfig) {
+    if (write) {
+      args.push("--permission-mode", "default");
+    }
+    return;
+  }
+  if (!write) {
+    throw new Error("Explicit permission options require --write.");
+  }
+  args.push("--permission-mode", normalizePermissionMode(permissionConfig.mode || "default"));
+  for (const dir of permissionConfig.addDirs || []) {
+    args.push("--add-dir", String(dir));
+  }
+  for (const rule of permissionConfig.allowedTools || []) {
+    args.push("--allowed-tools", String(rule));
+  }
+  for (const rule of permissionConfig.disallowedTools || []) {
+    args.push("--disallowed-tools", String(rule));
+  }
+}
+
 export function nowIso() {
   return new Date().toISOString();
 }
@@ -148,7 +247,8 @@ export function buildClaudeArgs(options) {
     model = null,
     effort = null,
     allowMcp = false,
-    allowWeb = false
+    allowWeb = false,
+    permissionConfig = null
   } = options;
 
   if (write === "implicit") {
@@ -176,8 +276,8 @@ export function buildClaudeArgs(options) {
   }
   args.push("--no-chrome");
 
-  if (write) {
-    args.push("--permission-mode", "default");
+  if (write || permissionConfig) {
+    appendPermissionArgs(args, write, permissionConfig);
   } else if (mode === "review" || mode === "adversarial-review") {
     args.push("--tools", "", "--permission-mode", "plan");
   } else {
@@ -195,7 +295,8 @@ export function buildBackgroundArgs({
   model = null,
   effort = null,
   allowMcp = false,
-  allowWeb = false
+  allowWeb = false,
+  permissionConfig = null
 }) {
   if (!prompt || !String(prompt).trim()) {
     throw new Error("A prompt is required.");
@@ -214,7 +315,9 @@ export function buildBackgroundArgs({
     args.push("--mcp-config", EMPTY_MCP_CONFIG, "--strict-mcp-config");
   }
   args.push("--no-chrome");
-  if (!write) {
+  if (write || permissionConfig) {
+    appendPermissionArgs(args, write, permissionConfig);
+  } else {
     args.push("--tools", readToolsForMode(mode, allowWeb), "--permission-mode", "plan");
   }
   args.push(prompt);

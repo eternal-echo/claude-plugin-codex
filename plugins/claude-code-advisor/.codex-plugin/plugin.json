@@ -1,12 +1,12 @@
 {
   "name": "claude-code-advisor",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "Bring local Claude Code into Codex for reviews, prepared tasks, advice, and rescue work.",
   "author": {
     "name": "Yanchuk"
   },
-  "homepage": "https://github.com/yanchuk/claude-plugin-codex",
-  "repository": "https://github.com/yanchuk/claude-plugin-codex",
+  "homepage": "https://github.com/eternal-echo/claude-plugin-codex",
+  "repository": "https://github.com/eternal-echo/claude-plugin-codex",
   "license": "MIT",
   "keywords": [
     "codex",
@@ -28,9 +28,9 @@
       "Read",
       "Write"
     ],
-    "websiteURL": "https://github.com/yanchuk/claude-plugin-codex",
-    "privacyPolicyURL": "https://github.com/yanchuk/claude-plugin-codex#privacy",
-    "termsOfServiceURL": "https://github.com/yanchuk/claude-plugin-codex#terms",
+    "websiteURL": "https://github.com/eternal-echo/claude-plugin-codex",
+    "privacyPolicyURL": "https://github.com/eternal-echo/claude-plugin-codex#privacy",
+    "termsOfServiceURL": "https://github.com/eternal-echo/claude-plugin-codex#terms",
     "defaultPrompt": [
       "Check Claude Code setup.",
       "Review this diff with Claude Code.",

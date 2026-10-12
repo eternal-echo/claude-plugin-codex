@@ -22,8 +22,8 @@ Canonical forms:
 ```text
 $claude setup
 $claude advise [--max-turns <n>] <question>
-$claude do [--background] [--write] [--model sonnet|opus] [--max-turns <n>] <prepared task>
-$claude rescue [--background] [--write] [--resume] [--model sonnet|opus] [--max-turns <n>] <task>
+$claude do [--background] [--write] [--permission-mode default|acceptEdits|dontAsk] [--add-dir <dir>]... [--allowed-tools <rule>]... [--disallowed-tools <rule>]... [--model sonnet|opus] [--max-turns <n>] <prepared task>
+$claude rescue [--background] [--write] [--resume] [--permission-mode default|acceptEdits|dontAsk] [--add-dir <dir>]... [--allowed-tools <rule>]... [--disallowed-tools <rule>]... [--model sonnet|opus] [--max-turns <n>] <task>
 $claude review [--base <ref>]
 $claude adversarial-review [--base <ref>] [focus]
 $claude monitor [job-id]
@@ -62,6 +62,22 @@ commands. The guaranteed Codex surface is the `$claude` skill mention.
 - Return a concise human summary unless the user asks for raw JSON.
 - Review and adversarial-review are read-only.
 - Write-capable Claude work requires explicit `--write`.
+- Explicit permission grants (`--permission-mode default|acceptEdits|dontAsk`,
+  repeatable `--add-dir`, `--allowed-tools`, `--disallowed-tools`) require
+  `--write` and are only supported for `advise`, `do`, and `rescue`.
+  `bypassPermissions` is rejected. Pass each grant as its own value; never rely
+  on shell splitting. Grants allow only what is supplied, not a blanket bypass.
+- Default write runs stay conservative: `--write` alone means permission mode
+  `default` with no extra grants. The same options apply to foreground,
+  background, and timeout-fallback runs, and the stored permission config is
+  reused verbatim on `--resume` without implicit escalation.
+- Never auto-approve a Claude permission prompt. When `monitor` or `status`
+  reports `awaiting_permission`, relay the prompt to the user and wait, or
+  cancel and relaunch with explicit permission options. When it reports
+  `needs_isolation` (background worktree isolation rejected Claude's writes),
+  stop the job and rerun from a writable directory or an explicit
+  user-authorized `--cwd`; do not change isolation settings yourself. The
+  companion does not wake blocked sessions automatically.
 - Every default companion launch must be non-interactive. Keep the runtime's
   MCP isolation flags: `--mcp-config '{"mcpServers":{}}'
   --strict-mcp-config --no-chrome`. These are essential for unattended runs;
@@ -113,7 +129,9 @@ commands. The guaranteed Codex surface is the `$claude` skill mention.
 - `monitor`: use after a background advise or rescue job to poll Claude logs
   and active agent state. Default to `--interval-ms 30000`. Prefer the human
   summary unless the user asks for raw JSON; it reports active/stale state, the
-  last meaningful output line, and the suggested next action.
+  last meaningful output line, and the suggested next action. Treat
+  `awaiting_permission` and `needs_isolation` as blocked states that need a user
+  decision; the companion never auto-approves.
 - `review`: use for short structured read-only review of local git state.
 - `adversarial-review`: use for challenge reviews, plan attacks, and harness
   checker passes.

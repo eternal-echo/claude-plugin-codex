@@ -554,8 +554,9 @@ if (args[0] === "--bg") {
 }
 if (args.includes("-p")) {
   setTimeout(() => {}, 5000);
+} else {
+  console.error("unsupported"); process.exit(2);
 }
-console.error("unsupported"); process.exit(2);
 `);
   const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "claude-state-"));
   const env = { ...process.env, PATH: `${fake.dir}:${process.env.PATH}`, CLAUDE_COMPANION_STATE_ROOT: stateRoot };
@@ -583,8 +584,9 @@ test("foreground advise can disable timeout background fallback", () => {
 const args = process.argv.slice(2);
 if (args.includes("-p")) {
   setTimeout(() => {}, 5000);
+} else {
+  console.error("unsupported"); process.exit(2);
 }
-console.error("unsupported"); process.exit(2);
 `);
   const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "claude-state-"));
   const result = spawnSync(
@@ -724,4 +726,602 @@ setTimeout(() => {}, 5000);
 
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /timed out/);
+});
+
+test("do write task passes explicit permission options as exact argv values", () => {
+  const sharedRoot = fs.mkdtempSync(path.join(os.tmpdir(), "shared-dirs-"));
+  const firstDir = path.join(sharedRoot, "one dir");
+  const secondDir = path.join(sharedRoot, "second");
+  fs.mkdirSync(firstDir, { recursive: true });
+  fs.mkdirSync(secondDir, { recursive: true });
+  const fake = makeFakeClaude(`
+const args = process.argv.slice(2);
+if (args.includes("-p")) {
+  const mode = args[args.indexOf("--permission-mode") + 1];
+  if (mode !== "acceptEdits") {
+    console.error("expected --permission-mode acceptEdits, got " + mode);
+    process.exit(2);
+  }
+  const dirs = args.filter((value, index) => args[index - 1] === "--add-dir");
+  if (dirs.length !== 2 || dirs[0] !== ${JSON.stringify(firstDir)} || dirs[1] !== ${JSON.stringify(secondDir)}) {
+    console.error("expected two separate --add-dir values, got " + JSON.stringify(dirs));
+    process.exit(2);
+  }
+  const allowed = args.filter((value, index) => args[index - 1] === "--allowed-tools");
+  if (allowed.length !== 1 || allowed[0] !== "Bash(npm test)") {
+    console.error("expected --allowed-tools 'Bash(npm test)' as one argv value, got " + JSON.stringify(allowed));
+    process.exit(2);
+  }
+  const disallowed = args.filter((value, index) => args[index - 1] === "--disallowed-tools");
+  if (disallowed.length !== 1 || disallowed[0] !== "WebSearch") {
+    console.error("unexpected --disallowed-tools " + JSON.stringify(disallowed));
+    process.exit(2);
+  }
+  if (args.includes("--model")) {
+    console.error("must not force a model");
+    process.exit(2);
+  }
+  if (!args.includes("--mcp-config") || !args.includes("--strict-mcp-config") || !args.includes("--no-chrome")) {
+    console.error("missing MCP isolation flags");
+    process.exit(2);
+  }
+  console.log("done");
+  process.exit(0);
+}
+console.error("unsupported"); process.exit(2);
+`);
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "claude-state-"));
+  const env = { ...process.env, PATH: `${fake.dir}:${process.env.PATH}`, CLAUDE_COMPANION_STATE_ROOT: stateRoot };
+  const stdout = execFileSync(
+    process.execPath,
+    [
+      companion.pathname,
+      "do",
+      "--write",
+      "--permission-mode",
+      "acceptEdits",
+      "--add-dir",
+      firstDir,
+      "--add-dir",
+      secondDir,
+      "--allowed-tools",
+      "Bash(npm test)",
+      "--disallowed-tools",
+      "WebSearch",
+      "run the prepared task",
+      "--json"
+    ],
+    { env, cwd: stateRoot, encoding: "utf8" }
+  );
+  const payload = JSON.parse(stdout);
+
+  assert.equal(payload.status, "completed");
+  assert.equal(payload.permissionConfig.mode, "acceptEdits");
+
+  const result = execFileSync(process.execPath, [companion.pathname, "result", payload.jobId, "--json"], {
+    env,
+    cwd: stateRoot,
+    encoding: "utf8"
+  });
+  assert.deepEqual(JSON.parse(result).job.permissionConfig, {
+    mode: "acceptEdits",
+    addDirs: [firstDir, secondDir],
+    allowedTools: ["Bash(npm test)"],
+    disallowedTools: ["WebSearch"]
+  });
+});
+
+test("permission options without --write fail clearly", () => {
+  const fake = makeFakeClaude(`
+const args = process.argv.slice(2);
+if (args.includes("-p") || args[0] === "--bg") {
+  console.error("should not launch");
+  process.exit(2);
+}
+console.error("unsupported"); process.exit(2);
+`);
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "claude-state-"));
+  const env = { ...process.env, PATH: `${fake.dir}:${process.env.PATH}`, CLAUDE_COMPANION_STATE_ROOT: stateRoot };
+  const doResult = spawnSync(
+    process.execPath,
+    [companion.pathname, "do", "--allowed-tools", "Bash(npm test)", "run the task", "--json"],
+    { env, cwd: stateRoot, encoding: "utf8" }
+  );
+  assert.notEqual(doResult.status, 0);
+  assert.match(doResult.stderr, /--write/);
+
+  const rescueResult = spawnSync(
+    process.execPath,
+    [companion.pathname, "rescue", "--add-dir", "/tmp", "diagnose", "--json"],
+    { env, cwd: stateRoot, encoding: "utf8" }
+  );
+  assert.notEqual(rescueResult.status, 0);
+  assert.match(rescueResult.stderr, /--write/);
+});
+
+test("permission-mode validation rejects bypassPermissions and unsupported values", () => {
+  const fake = makeFakeClaude(`
+const args = process.argv.slice(2);
+if (args.includes("-p") || args[0] === "--bg") {
+  console.error("should not launch");
+  process.exit(2);
+}
+console.error("unsupported"); process.exit(2);
+`);
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "claude-state-"));
+  const env = { ...process.env, PATH: `${fake.dir}:${process.env.PATH}`, CLAUDE_COMPANION_STATE_ROOT: stateRoot };
+
+  const bypass = spawnSync(
+    process.execPath,
+    [companion.pathname, "do", "--write", "--permission-mode", "bypassPermissions", "task", "--json"],
+    { env, cwd: stateRoot, encoding: "utf8" }
+  );
+  assert.notEqual(bypass.status, 0);
+  assert.match(bypass.stderr, /bypassPermissions/);
+
+  const unsupported = spawnSync(
+    process.execPath,
+    [companion.pathname, "do", "--write", "--permission-mode", "auto", "task", "--json"],
+    { env, cwd: stateRoot, encoding: "utf8" }
+  );
+  assert.notEqual(unsupported.status, 0);
+  assert.match(unsupported.stderr, /default, acceptEdits, dontAsk/);
+});
+
+test("mixed-case permission modes normalize to canonical values", () => {
+  const fake = makeFakeClaude(`
+const args = process.argv.slice(2);
+if (args.includes("-p")) {
+  const mode = args[args.indexOf("--permission-mode") + 1];
+  if (mode !== "acceptEdits") {
+    console.error("expected canonical acceptEdits, got " + mode);
+    process.exit(2);
+  }
+  console.log("ok");
+  process.exit(0);
+}
+console.error("unsupported"); process.exit(2);
+`);
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "claude-state-"));
+  const stdout = execFileSync(
+    process.execPath,
+    [companion.pathname, "do", "--write", "--permission-mode", "AcceptEdits", "task", "--json"],
+    {
+      env: { ...process.env, PATH: `${fake.dir}:${process.env.PATH}`, CLAUDE_COMPANION_STATE_ROOT: stateRoot },
+      cwd: stateRoot,
+      encoding: "utf8"
+    }
+  );
+  assert.equal(JSON.parse(stdout).status, "completed");
+});
+
+test("unknown and repeated flags fail clearly", () => {
+  const fake = makeFakeClaude(`
+const args = process.argv.slice(2);
+if (args.includes("-p") || args[0] === "--bg") {
+  console.error("should not launch");
+  process.exit(2);
+}
+console.error("unsupported"); process.exit(2);
+`);
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "claude-state-"));
+  const env = { ...process.env, PATH: `${fake.dir}:${process.env.PATH}`, CLAUDE_COMPANION_STATE_ROOT: stateRoot };
+
+  const unknown = spawnSync(
+    process.execPath,
+    [companion.pathname, "do", "--bogus-flag", "value", "task", "--json"],
+    { env, cwd: stateRoot, encoding: "utf8" }
+  );
+  assert.notEqual(unknown.status, 0);
+  assert.match(unknown.stderr, /Unknown option/);
+
+  const repeated = spawnSync(
+    process.execPath,
+    [
+      companion.pathname,
+      "do",
+      "--write",
+      "--permission-mode",
+      "default",
+      "--permission-mode",
+      "acceptEdits",
+      "task",
+      "--json"
+    ],
+    { env, cwd: stateRoot, encoding: "utf8" }
+  );
+  assert.notEqual(repeated.status, 0);
+  assert.match(repeated.stderr, /once/);
+});
+
+test("review rejects permission options as read-only", () => {
+  const fake = makeFakeClaude(`
+const args = process.argv.slice(2);
+if (args.includes("-p")) {
+  console.error("review should not gain permissions");
+  process.exit(2);
+}
+console.error("unsupported"); process.exit(2);
+`);
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "claude-state-"));
+  const result = spawnSync(
+    process.execPath,
+    [companion.pathname, "review", "--allowed-tools", "Bash(git diff)", "--json"],
+    {
+      env: { ...process.env, PATH: `${fake.dir}:${process.env.PATH}`, CLAUDE_COMPANION_STATE_ROOT: stateRoot },
+      cwd: stateRoot,
+      encoding: "utf8"
+    }
+  );
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /read-only/);
+});
+
+test("timeout fallback carries the same permission options into background", () => {
+  const fake = makeFakeClaude(`
+const args = process.argv.slice(2);
+if (args[0] === "--bg") {
+  const mode = args[args.indexOf("--permission-mode") + 1];
+  if (mode !== "acceptEdits") {
+    console.error("expected --permission-mode acceptEdits in background, got " + mode);
+    process.exit(2);
+  }
+  const allowed = args.filter((value, index) => args[index - 1] === "--allowed-tools");
+  if (allowed.length !== 1 || allowed[0] !== "Bash(npm test)") {
+    console.error("expected --allowed-tools in background, got " + JSON.stringify(allowed));
+    process.exit(2);
+  }
+  console.log("backgrounded · bg123 (idle - send a prompt to start)");
+  process.exit(0);
+}
+if (args.includes("-p")) {
+  setTimeout(() => {}, 5000);
+} else {
+  console.error("unsupported"); process.exit(2);
+}
+`);
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "claude-state-"));
+  const stdout = execFileSync(
+    process.execPath,
+    [
+      companion.pathname,
+      "do",
+      "--write",
+      "--permission-mode",
+      "acceptEdits",
+      "--allowed-tools",
+      "Bash(npm test)",
+      "--timeout-ms",
+      "50",
+      "run the task",
+      "--json"
+    ],
+    {
+      env: { ...process.env, PATH: `${fake.dir}:${process.env.PATH}`, CLAUDE_COMPANION_STATE_ROOT: stateRoot },
+      cwd: stateRoot,
+      encoding: "utf8"
+    }
+  );
+  const payload = JSON.parse(stdout);
+
+  assert.equal(payload.status, "running");
+  assert.equal(payload.claudeSessionId, "bg123");
+  assert.equal(payload.permissionConfig.mode, "acceptEdits");
+});
+
+test("explicit resume reuses the persisted permission config", () => {
+  const fake = makeFakeClaude(`
+const args = process.argv.slice(2);
+if (args.includes("--version")) { console.log("2.1.132 (Claude Code)"); process.exit(0); }
+if (args[0] === "--bg") { console.log("backgrounded · bg777 (idle - send a prompt to start)"); process.exit(0); }
+if (args.includes("-p")) {
+  const resume = args[args.indexOf("--resume") + 1];
+  if (resume !== "bg777") {
+    console.error("expected --resume bg777, got " + resume);
+    process.exit(2);
+  }
+  const mode = args[args.indexOf("--permission-mode") + 1];
+  if (mode !== "acceptEdits") {
+    console.error("expected persisted --permission-mode acceptEdits, got " + mode);
+    process.exit(2);
+  }
+  const allowed = args.filter((value, index) => args[index - 1] === "--allowed-tools");
+  if (allowed.length !== 1 || allowed[0] !== "Bash(npm test)") {
+    console.error("expected persisted --allowed-tools, got " + JSON.stringify(allowed));
+    process.exit(2);
+  }
+  console.log("resumed");
+  process.exit(0);
+}
+console.error("unsupported"); process.exit(2);
+`);
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "claude-state-"));
+  const env = { ...process.env, PATH: `${fake.dir}:${process.env.PATH}`, CLAUDE_COMPANION_STATE_ROOT: stateRoot };
+  const launched = execFileSync(
+    process.execPath,
+    [
+      companion.pathname,
+      "do",
+      "--background",
+      "--write",
+      "--permission-mode",
+      "acceptEdits",
+      "--allowed-tools",
+      "Bash(npm test)",
+      "run the task",
+      "--json"
+    ],
+    { env, cwd: stateRoot, encoding: "utf8" }
+  );
+  const job = JSON.parse(launched);
+  assert.equal(job.claudeSessionId, "bg777");
+  assert.equal(job.permissionConfig.mode, "acceptEdits");
+
+  const stdout = execFileSync(
+    process.execPath,
+    [companion.pathname, "rescue", "--write", "--resume", "--job-id", job.jobId, "continue the task", "--json"],
+    { env, cwd: stateRoot, encoding: "utf8" }
+  );
+  const payload = JSON.parse(stdout);
+  assert.equal(payload.status, "completed");
+  assert.equal(payload.permissionConfig.mode, "acceptEdits");
+});
+
+test("resume with new explicit permission options replaces the persisted config", () => {
+  const fake = makeFakeClaude(`
+const args = process.argv.slice(2);
+if (args.includes("--version")) { console.log("2.1.132 (Claude Code)"); process.exit(0); }
+if (args[0] === "--bg") { console.log("backgrounded · bg778 (idle - send a prompt to start)"); process.exit(0); }
+if (args.includes("-p")) {
+  const mode = args[args.indexOf("--permission-mode") + 1];
+  if (mode !== "default") {
+    console.error("expected explicit --permission-mode default, got " + mode);
+    process.exit(2);
+  }
+  const allowed = args.filter((value, index) => args[index - 1] === "--allowed-tools");
+  if (allowed.length !== 1 || allowed[0] !== "Bash(ls)") {
+    console.error("expected explicit --allowed-tools 'Bash(ls)', got " + JSON.stringify(allowed));
+    process.exit(2);
+  }
+  console.log("resumed");
+  process.exit(0);
+}
+console.error("unsupported"); process.exit(2);
+`);
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "claude-state-"));
+  const env = { ...process.env, PATH: `${fake.dir}:${process.env.PATH}`, CLAUDE_COMPANION_STATE_ROOT: stateRoot };
+  const launched = execFileSync(
+    process.execPath,
+    [
+      companion.pathname,
+      "do",
+      "--background",
+      "--write",
+      "--permission-mode",
+      "acceptEdits",
+      "--allowed-tools",
+      "Bash(npm test)",
+      "run the task",
+      "--json"
+    ],
+    { env, cwd: stateRoot, encoding: "utf8" }
+  );
+  const job = JSON.parse(launched);
+
+  const stdout = execFileSync(
+    process.execPath,
+    [
+      companion.pathname,
+      "rescue",
+      "--write",
+      "--resume",
+      "--job-id",
+      job.jobId,
+      "--permission-mode",
+      "default",
+      "--allowed-tools",
+      "Bash(ls)",
+      "continue the task",
+      "--json"
+    ],
+    { env, cwd: stateRoot, encoding: "utf8" }
+  );
+  const payload = JSON.parse(stdout);
+  assert.equal(payload.status, "completed");
+  assert.deepEqual(payload.permissionConfig.allowedTools, ["Bash(ls)"]);
+});
+
+test("monitor classifies visible approval prompts as awaiting_permission", () => {
+  const fake = makeFakeClaude(`
+const args = process.argv.slice(2);
+if (args.includes("--version")) { console.log("2.1.132 (Claude Code)"); process.exit(0); }
+if (args[0] === "--bg") { console.log("backgrounded · bg409 (idle - send a prompt to start)"); process.exit(0); }
+if (args[0] === "logs") {
+  console.log("\\u001b[32m\\u2bfa\\u001b[39m Bash(npm test)");
+  console.log("\\u001b[7m\\u001b[1mDo you want to proceed?\\u001b[27m\\u001b[22m");
+  console.log("\\u276f 1. Yes");
+  console.log("  2. Yes, and don't ask again for this command");
+  console.log("  3. No, and tell Claude what to do differently (esc)");
+  process.exit(0);
+}
+if (args[0] === "agents") { console.log("bg409 running"); process.exit(0); }
+console.error("unsupported"); process.exit(2);
+`);
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "claude-state-"));
+  const env = { ...process.env, PATH: `${fake.dir}:${process.env.PATH}`, CLAUDE_COMPANION_STATE_ROOT: stateRoot };
+  const launched = execFileSync(
+    process.execPath,
+    [
+      companion.pathname,
+      "do",
+      "--background",
+      "--write",
+      "--permission-mode",
+      "acceptEdits",
+      "--allowed-tools",
+      "Bash(npm test)",
+      "run the tests",
+      "--json"
+    ],
+    { env, cwd: stateRoot, encoding: "utf8" }
+  );
+  const job = JSON.parse(launched);
+  const watched = execFileSync(
+    process.execPath,
+    [companion.pathname, "monitor", job.jobId, "--max-checks", "1", "--json"],
+    { env, cwd: stateRoot, encoding: "utf8" }
+  );
+  const snapshot = JSON.parse(watched.trim());
+
+  assert.equal(snapshot.active, true);
+  assert.equal(snapshot.completed, false);
+  assert.equal(snapshot.summary.state, "awaiting_permission");
+  assert.equal(snapshot.summary.awaitingPermission, true);
+  assert.equal(snapshot.summary.permissionPrompt, "Do you want to proceed?");
+  assert.match(snapshot.summary.pendingAction, /Do you want to proceed\?/);
+  assert.match(snapshot.summary.nextAction, /never auto-approves/);
+  assert.equal(snapshot.permissionConfig.mode, "acceptEdits");
+
+  const human = execFileSync(
+    process.execPath,
+    [companion.pathname, "monitor", job.jobId, "--max-checks", "1"],
+    { env, cwd: stateRoot, encoding: "utf8" }
+  );
+  assert.match(human, /Do you want to proceed\?/);
+  assert.match(human, /Next action/);
+
+  const result = execFileSync(process.execPath, [companion.pathname, "result", job.jobId, "--json"], {
+    env,
+    cwd: stateRoot,
+    encoding: "utf8"
+  });
+  const stored = JSON.parse(result);
+  assert.equal(stored.job.status, "running");
+});
+
+test("monitor classifies worktree isolation rejection as needs_isolation", () => {
+  const fake = makeFakeClaude(`
+const args = process.argv.slice(2);
+if (args.includes("--version")) { console.log("2.1.132 (Claude Code)"); process.exit(0); }
+if (args[0] === "--bg") { console.log("backgrounded · bg505 (idle - send a prompt to start)"); process.exit(0); }
+if (args[0] === "logs") {
+  console.log("\\u2bfa Write(.claude/settings.json)");
+  console.log("\\u23bf Error: file edits in the shared checkout are rejected until you isolate.");
+  console.log("  Set worktree.bgIsolation=none in the project .claude/settings.json, or use EnterWorktree.");
+  process.exit(0);
+}
+if (args[0] === "agents") { console.log("bg505 running"); process.exit(0); }
+console.error("unsupported"); process.exit(2);
+`);
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "claude-state-"));
+  const env = { ...process.env, PATH: `${fake.dir}:${process.env.PATH}`, CLAUDE_COMPANION_STATE_ROOT: stateRoot };
+  const launched = execFileSync(
+    process.execPath,
+    [companion.pathname, "do", "--background", "--write", "update the config", "--json"],
+    { env, cwd: stateRoot, encoding: "utf8" }
+  );
+  const job = JSON.parse(launched);
+  const watched = execFileSync(
+    process.execPath,
+    [companion.pathname, "monitor", job.jobId, "--max-checks", "1", "--json"],
+    { env, cwd: stateRoot, encoding: "utf8" }
+  );
+  const snapshot = JSON.parse(watched.trim());
+
+  assert.equal(snapshot.completed, false);
+  assert.equal(snapshot.summary.state, "needs_isolation");
+  assert.equal(snapshot.summary.blocked, true);
+  assert.notEqual(snapshot.summary.state, "active");
+  assert.match(snapshot.summary.pendingAction, /isolation/i);
+  assert.match(snapshot.summary.nextAction, /--cwd/);
+
+  const result = execFileSync(process.execPath, [companion.pathname, "result", job.jobId, "--json"], {
+    env,
+    cwd: stateRoot,
+    encoding: "utf8"
+  });
+  assert.equal(JSON.parse(result).job.status, "running");
+});
+
+test("status and result surface the stored permission config", () => {
+  const fake = makeFakeClaude(`
+const args = process.argv.slice(2);
+if (args.includes("--version")) { console.log("2.1.132 (Claude Code)"); process.exit(0); }
+if (args[0] === "--bg") { console.log("backgrounded · bg606 (idle - send a prompt to start)"); process.exit(0); }
+if (args[0] === "logs") { console.log("working"); process.exit(0); }
+if (args[0] === "agents") { console.log("bg606 running"); process.exit(0); }
+console.error("unsupported"); process.exit(2);
+`);
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "claude-state-"));
+  const env = { ...process.env, PATH: `${fake.dir}:${process.env.PATH}`, CLAUDE_COMPANION_STATE_ROOT: stateRoot };
+  const launched = execFileSync(
+    process.execPath,
+    [
+      companion.pathname,
+      "do",
+      "--background",
+      "--write",
+      "--permission-mode",
+      "dontAsk",
+      "--allowed-tools",
+      "Bash(npm test)",
+      "run the task",
+      "--json"
+    ],
+    { env, cwd: stateRoot, encoding: "utf8" }
+  );
+  const job = JSON.parse(launched);
+
+  const expectedConfig = {
+    mode: "dontAsk",
+    addDirs: [],
+    allowedTools: ["Bash(npm test)"],
+    disallowedTools: []
+  };
+  const status = execFileSync(process.execPath, [companion.pathname, "status", job.jobId, "--json"], {
+    env,
+    cwd: stateRoot,
+    encoding: "utf8"
+  });
+  assert.deepEqual(JSON.parse(status).job.permissionConfig, expectedConfig);
+
+  const result = execFileSync(process.execPath, [companion.pathname, "result", job.jobId, "--json"], {
+    env,
+    cwd: stateRoot,
+    encoding: "utf8"
+  });
+  assert.deepEqual(JSON.parse(result).job.permissionConfig, expectedConfig);
+});
+
+test("explicit shared working directory runs Claude in the authorized cwd", () => {
+  const fake = makeFakeClaude(`
+const args = process.argv.slice(2);
+if (args.includes("-p")) { console.log("cwd:" + process.cwd()); process.exit(0); }
+console.error("unsupported"); process.exit(2);
+`);
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "claude-state-"));
+  const env = { ...process.env, PATH: `${fake.dir}:${process.env.PATH}`, CLAUDE_COMPANION_STATE_ROOT: stateRoot };
+  const target = fs.mkdtempSync(path.join(os.tmpdir(), "shared-cwd-"));
+  const stdout = execFileSync(
+    process.execPath,
+    [companion.pathname, "do", "--cwd", target, "inspect the code", "--json"],
+    { env, cwd: stateRoot, encoding: "utf8" }
+  );
+  assert.equal(JSON.parse(stdout).output, `cwd:${target}`);
+
+  const relative = spawnSync(
+    process.execPath,
+    [companion.pathname, "do", "--cwd", "relative/path", "inspect", "--json"],
+    { env, cwd: stateRoot, encoding: "utf8" }
+  );
+  assert.notEqual(relative.status, 0);
+  assert.match(relative.stderr, /absolute/);
+
+  const missing = spawnSync(
+    process.execPath,
+    [companion.pathname, "do", "--cwd", "/nonexistent/shared/dir", "inspect", "--json"],
+    { env, cwd: stateRoot, encoding: "utf8" }
+  );
+  assert.notEqual(missing.status, 0);
+  assert.match(missing.stderr, /existing directory/);
 });

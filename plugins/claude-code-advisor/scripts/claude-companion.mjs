@@ -11,6 +11,7 @@ import {
   buildReviewPrompt,
   generateJobId,
   loadState,
+  normalizePermissionConfig,
   parseClaudeJsonResult,
   parseBackgroundLaunch,
   renderHuman,
@@ -33,6 +34,44 @@ const DEFAULT_STALE_AFTER_MS = 120000;
 const DEFAULT_CLAUDE_EFFORT = "xhigh";
 const SUPPORTED_MAJOR = 2;
 
+const FLAG_OPTIONS = new Set([
+  "json",
+  "background",
+  "write",
+  "resume",
+  "fresh",
+  "watch",
+  "follow",
+  "forever",
+  "no-background-fallback",
+  "allow-mcp",
+  "allow-web"
+]);
+const VALUE_OPTIONS = new Set([
+  "model",
+  "effort",
+  "max-turns",
+  "timeout-ms",
+  "output-format",
+  "base",
+  "interval-ms",
+  "max-checks",
+  "stale-after-ms",
+  "background-timeout-ms",
+  "job-id",
+  "cwd",
+  "permission-mode"
+]);
+const LIST_OPTIONS = new Set(["add-dir", "allowed-tools", "disallowed-tools"]);
+
+function readOptionValue(argv, index, key) {
+  const value = argv[index + 1];
+  if (value == null || value.startsWith("--")) {
+    throw new Error(`Missing value for --${key}.`);
+  }
+  return value;
+}
+
 function parseArgs(argv) {
   const options = {};
   const positionals = [];
@@ -43,30 +82,24 @@ function parseArgs(argv) {
       continue;
     }
     const key = arg.slice(2);
-    if (
-      [
-        "json",
-        "background",
-        "write",
-        "resume",
-        "fresh",
-        "watch",
-        "follow",
-        "forever",
-        "no-background-fallback",
-        "allow-mcp",
-        "allow-web"
-      ].includes(key)
-    ) {
+    if (FLAG_OPTIONS.has(key)) {
       options[key] = true;
       continue;
     }
-    const value = argv[index + 1];
-    if (value == null) {
-      throw new Error(`Missing value for --${key}.`);
+    if (LIST_OPTIONS.has(key)) {
+      options[key] = [...(options[key] || []), readOptionValue(argv, index, key)];
+      index += 1;
+      continue;
     }
-    options[key] = value;
-    index += 1;
+    if (VALUE_OPTIONS.has(key)) {
+      if (key in options) {
+        throw new Error(`--${key} may only be passed once.`);
+      }
+      options[key] = readOptionValue(argv, index, key);
+      index += 1;
+      continue;
+    }
+    throw new Error(`Unknown option: --${key}.`);
   }
   return { options, positionals };
 }
@@ -188,6 +221,33 @@ function extractMeaningfulLogLines(output) {
     .filter(isMeaningfulLogLine);
 }
 
+const PERMISSION_PROMPT_PATTERNS = [
+  /do you (?:want|wish) to\b[^\n]*\?/i,
+  /^allow (?:claude |me )?(?:to )?(?:read|reading|run|running|edit|editing|write|writing|create|creating|fetch|fetching|access|search)\b[^\n]*\??/i,
+  /^allow\b[^\n]*\?/i,
+  /^\s*\d+\.\s+(?:yes|no|don't ask|allow|deny|proceed|skip)\b/i,
+  /contains (?:simple_)?expansion/i
+];
+
+const ISOLATION_BLOCK_PATTERNS = [
+  /worktree\.bgIsolation/,
+  /rejected until you isolate/i,
+  /\bEnterWorktree\b/
+];
+
+function firstMatchingLogLine(output, patterns) {
+  for (const line of stripTerminalControl(output).split(/\r?\n/)) {
+    const text = normalizeLogLine(line);
+    if (!text) {
+      continue;
+    }
+    if (patterns.some((pattern) => pattern.test(text))) {
+      return text;
+    }
+  }
+  return null;
+}
+
 function formatDuration(ms) {
   const seconds = Math.max(0, Math.round(ms / 1000));
   if (seconds < 60) {
@@ -263,8 +323,25 @@ function parseClaudeVersion(stdout) {
   };
 }
 
+function resolveOptionCwd(options = {}) {
+  if (options.cwd == null) {
+    return null;
+  }
+  const value = String(options.cwd).trim();
+  if (!value) {
+    throw new Error("--cwd requires a directory path.");
+  }
+  if (!path.isAbsolute(value)) {
+    throw new Error(`--cwd requires an absolute directory path. Received: ${value}`);
+  }
+  if (!fs.existsSync(value) || !fs.statSync(value).isDirectory()) {
+    throw new Error(`--cwd requires an existing directory. Received: ${value}`);
+  }
+  return value;
+}
+
 function currentContext(options = {}) {
-  const cwd = path.resolve(options.cwd || process.cwd());
+  const cwd = path.resolve(resolveOptionCwd(options) || process.cwd());
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const stateRoot = resolveStateRoot(process.env);
   const stateDir = resolveStateDir(workspaceRoot, process.env, stateRoot);
@@ -381,6 +458,7 @@ function createJob(ctx, kind, options = {}) {
     kind,
     status: "running",
     write: Boolean(options.write),
+    permissionConfig: options.permissionConfig || null,
     codexThreadId: process.env.CODEX_THREAD_ID || null,
     workspaceRoot: ctx.workspaceRoot,
     summary: options.summary || kind
@@ -394,9 +472,16 @@ function completeJob(ctx, job, patch) {
 }
 
 function runForeground(ctx, kind, prompt, options = {}) {
-  const job = createJob(ctx, kind, { write: options.write, summary: prompt.slice(0, 100) });
+  const resume = options.resume
+    ? selectResumeCandidate(ctx.state.jobs, process.env, {
+        resume: true,
+        write: Boolean(options.write),
+        explicitJobId: options["job-id"] || null
+      })
+    : null;
+  const permissionConfig = options.permissionConfig || resume?.permissionConfig || null;
+  const job = createJob(ctx, kind, { write: options.write, summary: prompt.slice(0, 100), permissionConfig });
   ctx.state = persistContext(ctx, upsertJob(ctx.state, job));
-  const resume = options.resume ? selectResumeCandidate(ctx.state.jobs.filter((item) => item.id !== job.id), process.env, options) : null;
   const args = buildClaudeArgs({
     mode: kind,
     prompt,
@@ -407,7 +492,8 @@ function runForeground(ctx, kind, prompt, options = {}) {
     model: options.model || null,
     effort: options.effort || DEFAULT_CLAUDE_EFFORT,
     allowMcp: Boolean(options["allow-mcp"]),
-    allowWeb: Boolean(options["allow-web"])
+    allowWeb: Boolean(options["allow-web"]),
+    permissionConfig
   });
   let result;
   try {
@@ -452,7 +538,11 @@ function runBackground(ctx, kind, prompt, options = {}) {
     throw new Error("Claude background mode is unavailable. Run foreground or rerun setup after upgrading Claude Code.");
   }
   assertBackgroundMcpSafe(ctx, options);
-  const job = createJob(ctx, kind, { write: options.write, summary: prompt.slice(0, 100) });
+  const job = createJob(ctx, kind, {
+    write: options.write,
+    summary: prompt.slice(0, 100),
+    permissionConfig: options.permissionConfig || null
+  });
   const args = buildBackgroundArgs({
     prompt,
     name: `codex-${job.id}`,
@@ -461,7 +551,8 @@ function runBackground(ctx, kind, prompt, options = {}) {
     model: options.model || null,
     effort: options.effort || DEFAULT_CLAUDE_EFFORT,
     allowMcp: Boolean(options["allow-mcp"]),
-    allowWeb: Boolean(options["allow-web"])
+    allowWeb: Boolean(options["allow-web"]),
+    permissionConfig: options.permissionConfig || null
   });
   const result = runClaude(args, { cwd: ctx.cwd, timeoutMs: Number(options.timeoutMs || 30000) });
   if (result.status !== 0) {
@@ -486,10 +577,21 @@ function handleTaskCommand(argv, kind) {
   const { options, positionals } = parseArgs(argv);
   const ctx = currentContext(options);
   const prompt = positionals.join(" ").trim();
+  const permissionConfig = normalizePermissionConfig(
+    {
+      write: Boolean(options.write),
+      mode: options["permission-mode"] ?? null,
+      addDirs: options["add-dir"] || [],
+      allowedTools: options["allowed-tools"] || [],
+      disallowedTools: options["disallowed-tools"] || []
+    },
+    ctx.cwd
+  );
+  const runOptions = { ...options, permissionConfig };
   const job = options.background
-    ? runBackground(ctx, kind, prompt, options)
+    ? runBackground(ctx, kind, prompt, runOptions)
     : runForeground(ctx, kind, prompt, {
-        ...options,
+        ...runOptions,
         outputFormat: options["output-format"] || "text",
         maxTurns: options["max-turns"],
         timeoutMs: options["timeout-ms"]
@@ -499,6 +601,7 @@ function handleTaskCommand(argv, kind) {
       jobId: job.id,
       status: job.status,
       claudeSessionId: job.claudeSessionId ?? null,
+      permissionConfig: job.permissionConfig ?? null,
       output: job.result ?? job.stdout ?? ""
     },
     options.json
@@ -517,8 +620,23 @@ function handleDo(argv) {
   handleTaskCommand(argv, "do");
 }
 
+function assertNoPermissionOptions(options) {
+  const provided = ["permission-mode", "add-dir", "allowed-tools", "disallowed-tools"].filter((key) => {
+    const value = options[key];
+    return value != null && (!Array.isArray(value) || value.length > 0);
+  });
+  if (provided.length > 0) {
+    throw new Error(
+      `Review and adversarial-review are read-only. Permission options (${provided
+        .map((key) => `--${key}`)
+        .join(", ")}) are only supported for advise, do, and rescue with --write.`
+    );
+  }
+}
+
 function handleReview(argv, kind) {
   const { options, positionals } = parseArgs(argv);
+  assertNoPermissionOptions(options);
   const ctx = currentContext(options);
   const focus = positionals.join(" ").trim();
   const prompt = buildReviewPrompt({
@@ -586,13 +704,24 @@ function readLiveStatus(job, options = {}) {
   const logsOutput = stripTerminalControl(`${logs.stdout || ""}${logs.stderr || ""}`);
   const meaningfulLogLines = extractMeaningfulLogLines(logsOutput);
   const completed = isCompletedLogOutput(logsOutput);
+  const permissionPrompt = firstMatchingLogLine(logsOutput, PERMISSION_PROMPT_PATTERNS);
+  const isolationBlock = firstMatchingLogLine(logsOutput, ISOLATION_BLOCK_PATTERNS);
   return {
     checkedAt: new Date().toISOString(),
     jobId: job.id,
     claudeSessionId: job.claudeSessionId,
+    permissionConfig: job.permissionConfig ?? null,
     active: logs.status === 0 && !completed,
     completed,
     available: logs.status === 0 || agents.status === 0,
+    permission: {
+      awaiting: Boolean(permissionPrompt),
+      prompt: permissionPrompt
+    },
+    isolation: {
+      blocked: Boolean(isolationBlock),
+      detail: isolationBlock
+    },
     logs: {
       available: logs.status === 0,
       output: logsOutput.trim(),
@@ -625,13 +754,27 @@ function summarizeLiveStatus(snapshot, monitorState = {}, options = {}) {
     monitorState.repeatedMeaningfulChecks = (monitorState.repeatedMeaningfulChecks || 0) + 1;
   }
 
+  const awaitingPermission = Boolean(snapshot.permission?.awaiting);
+  const permissionPrompt = snapshot.permission?.prompt || null;
+  const isolationBlocked = Boolean(snapshot.isolation?.blocked);
   const changedAtMs = monitorState.meaningfulChangedAtMs || nowMs;
   const staleForMs = isRepeatedMeaningfulOutput ? Math.max(0, nowMs - changedAtMs) : 0;
-  const stale = Boolean(snapshot.active && fingerprint && isRepeatedMeaningfulOutput && staleForMs >= staleAfterMs);
+  const stale = Boolean(
+    snapshot.active &&
+      fingerprint &&
+      isRepeatedMeaningfulOutput &&
+      staleForMs >= staleAfterMs &&
+      !awaitingPermission &&
+      !isolationBlocked
+  );
   const lastMeaningfulLine = meaningfulLines.at(-1) || null;
   let state = snapshot.active ? "active" : "inactive";
   if (!snapshot.available) {
     state = "unavailable";
+  } else if (isolationBlocked) {
+    state = "needs_isolation";
+  } else if (awaitingPermission) {
+    state = "awaiting_permission";
   } else if (stale) {
     state = "stale";
   }
@@ -645,11 +788,32 @@ function summarizeLiveStatus(snapshot, monitorState = {}, options = {}) {
     suggestedAction = "Check whether Claude Code is installed and the background session still exists.";
   }
 
+  let pendingAction = null;
+  let nextAction = null;
+  if (state === "awaiting_permission") {
+    pendingAction = `Claude is waiting for permission approval: ${permissionPrompt}`;
+    nextAction =
+      "Ask the user to approve this prompt, or cancel and relaunch with explicit permission options (--write with --permission-mode, --allowed-tools, or --add-dir). The companion never auto-approves.";
+    suggestedAction = nextAction;
+  } else if (state === "needs_isolation") {
+    pendingAction = `Claude writes are blocked by background worktree isolation: ${
+      snapshot.isolation?.detail || ""
+    }`.trim();
+    nextAction =
+      "Stop the job and rerun from a writable working directory (for example an explicit --cwd the user authorized), or have the user adjust the project isolation settings. The companion does not change isolation settings itself.";
+    suggestedAction = nextAction;
+  }
+
   return {
     ...snapshot,
     summary: {
       state,
       active: snapshot.active,
+      blocked: state === "needs_isolation",
+      awaitingPermission: state === "awaiting_permission",
+      permissionPrompt,
+      pendingAction,
+      nextAction,
       lastMeaningfulLine,
       stale,
       staleForMs,
@@ -683,6 +847,23 @@ function persistMonitorSnapshot(ctx, job, snapshot) {
   return completeJob(ctx, job, patch);
 }
 
+function describePermissionConfig(config) {
+  if (!config) {
+    return "none";
+  }
+  const parts = [`mode=${config.mode}`];
+  if (config.addDirs?.length) {
+    parts.push(`add-dir=${config.addDirs.join(",")}`);
+  }
+  if (config.allowedTools?.length) {
+    parts.push(`allowed=${config.allowedTools.join(",")}`);
+  }
+  if (config.disallowedTools?.length) {
+    parts.push(`disallowed=${config.disallowedTools.join(",")}`);
+  }
+  return parts.join(" ");
+}
+
 function renderMonitorSnapshot(snapshot) {
   const summary = snapshot.summary || summarizeLiveStatus(snapshot).summary;
   const lines = [
@@ -691,17 +872,27 @@ function renderMonitorSnapshot(snapshot) {
   if (snapshot.error) {
     lines.push(snapshot.error);
   }
-  if (summary.lastMeaningfulLine) {
-    lines.push(`Last meaningful output: ${summary.lastMeaningfulLine}`);
-  } else if (snapshot.logs?.output) {
-    lines.push("Recent logs contained only Claude status output.");
-  } else if (snapshot.agents?.output) {
-    lines.push(snapshot.agents.output);
+  if (summary.state === "awaiting_permission" || summary.state === "needs_isolation") {
+    if (summary.pendingAction) {
+      lines.push(summary.pendingAction);
+    }
+    lines.push(`Permission config: ${describePermissionConfig(snapshot.permissionConfig)}`);
+    if (summary.nextAction) {
+      lines.push(`Next action: ${summary.nextAction}`);
+    }
+  } else {
+    if (summary.lastMeaningfulLine) {
+      lines.push(`Last meaningful output: ${summary.lastMeaningfulLine}`);
+    } else if (snapshot.logs?.output) {
+      lines.push("Recent logs contained only Claude status output.");
+    } else if (snapshot.agents?.output) {
+      lines.push(snapshot.agents.output);
+    }
+    if (summary.stale) {
+      lines.push(`No new meaningful output for ${summary.staleFor}.`);
+    }
+    lines.push(`Action: ${summary.suggestedAction}`);
   }
-  if (summary.stale) {
-    lines.push(`No new meaningful output for ${summary.staleFor}.`);
-  }
-  lines.push(`Action: ${summary.suggestedAction}`);
   return `${lines.join("\n")}\n`;
 }
 
@@ -785,7 +976,11 @@ function handleResumeCandidate(argv) {
   const ctx = currentContext(options);
   let candidate = null;
   try {
-    candidate = selectResumeCandidate(ctx.state.jobs, process.env, { resume: true, write: Boolean(options.write) });
+    candidate = selectResumeCandidate(ctx.state.jobs, process.env, {
+      resume: true,
+      write: Boolean(options.write),
+      explicitJobId: options["job-id"] || null
+    });
   } catch (error) {
     output({ available: false, error: error.message, candidates: ctx.state.jobs }, options.json);
     return;
@@ -798,16 +993,24 @@ function printUsage() {
     [
       "Usage:",
       "  claude-companion setup [--json]",
-      "  claude-companion advise [--background] [--write] [--max-turns <n>] [--effort <level>] [--allow-mcp] [--allow-web] [--no-background-fallback] [prompt]",
-      "  claude-companion do [--background] [--write] [--model <model>] [--max-turns <n>] [--effort <level>] [--allow-mcp] [--allow-web] [prompt]",
-      "  claude-companion rescue [--background] [--write] [--resume] [--model <model>] [--max-turns <n>] [--effort <level>] [--allow-mcp] [--allow-web] [--no-background-fallback] [prompt]",
+      "  claude-companion advise [--background] [--write] [--permission-mode default|acceptEdits|dontAsk] [--add-dir <dir>]... [--allowed-tools <rule>]... [--disallowed-tools <rule>]... [--max-turns <n>] [--effort <level>] [--allow-mcp] [--allow-web] [--no-background-fallback] [--cwd <dir>] [prompt]",
+      "  claude-companion do [--background] [--write] [--permission-mode default|acceptEdits|dontAsk] [--add-dir <dir>]... [--allowed-tools <rule>]... [--disallowed-tools <rule>]... [--model <model>] [--max-turns <n>] [--effort <level>] [--allow-mcp] [--allow-web] [--cwd <dir>] [prompt]",
+      "  claude-companion rescue [--background] [--write] [--resume] [--job-id <id>] [--permission-mode default|acceptEdits|dontAsk] [--add-dir <dir>]... [--allowed-tools <rule>]... [--disallowed-tools <rule>]... [--model <model>] [--max-turns <n>] [--effort <level>] [--allow-mcp] [--allow-web] [--no-background-fallback] [--cwd <dir>] [prompt]",
       "  claude-companion review [--base <ref>] [--max-turns <n>] [--effort <level>] [--json]",
       "  claude-companion adversarial-review [--base <ref>] [--max-turns <n>] [--effort <level>] [focus] [--json]",
       "  claude-companion monitor [job-id] [--interval-ms <ms>] [--max-checks <n>] [--stale-after-ms <ms>] [--json]",
       "  claude-companion status [job-id] [--watch] [--json]",
       "  claude-companion result [job-id] [--json]",
       "  claude-companion cancel [job-id] [--json]",
-      "  claude-companion resume-candidate [--json]"
+      "  claude-companion resume-candidate [--job-id <id>] [--json]",
+      "",
+      "Permission options (all require --write):",
+      "  --permission-mode default|acceptEdits|dontAsk  bypassPermissions is rejected.",
+      "  --add-dir <dir>            repeatable; each value is passed to Claude as its own argument.",
+      "  --allowed-tools <rule>     repeatable, e.g. 'Bash(npm test)'; grants only what is supplied.",
+      "  --disallowed-tools <rule>  repeatable; conflicts with --allowed-tools fail clearly.",
+      "Explicit grants are stored in job metadata and reused verbatim on --resume;",
+      "the companion never auto-approves Claude permission prompts."
     ].join("\n") + "\n"
   );
 }

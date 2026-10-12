@@ -47,7 +47,12 @@ assert.match(
 );
 
 const statusBefore = run("git", ["status", "--short"]);
-const execOutput = run("codex", ["exec", "--cd", repoRoot, "--json", advisePrompt], { input: "" });
+const execArgs = ["exec"];
+if (process.env.CODEX_PLUGIN_E2E_SANDBOX) {
+  execArgs.push("--sandbox", process.env.CODEX_PLUGIN_E2E_SANDBOX);
+}
+execArgs.push("--cd", repoRoot, "--json", advisePrompt);
+const execOutput = run("codex", execArgs, { input: "" });
 const events = parseJsonLines(execOutput);
 const adviseCommand = events.find((event) => {
   return event.type === "item.completed"

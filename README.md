@@ -5,8 +5,12 @@
 Add the public marketplace:
 
 ```bash
-codex plugin marketplace add yanchuk/claude-plugin-codex
+codex plugin marketplace add eternal-echo/claude-plugin-codex
 ```
+
+This is the `eternal-echo` fork of
+[`yanchuk/claude-plugin-codex`](https://github.com/yanchuk/claude-plugin-codex);
+the upstream project remains the origin of the plugin.
 
 Then open Codex's plugin directory, find `Claude Plugin Codex`, and install
 `Claude`.
@@ -135,6 +139,7 @@ $claude do --background --model opus debug this cross-module failure with a prep
 $claude rescue --background --model opus investigate the flaky integration test
 $claude monitor <job-id>
 $claude rescue --write fix the failing test with the smallest safe patch
+$claude do --write --permission-mode acceptEdits --add-dir /path/to/dir --allowed-tools 'Bash(npm test)' run the prepared task
 $claude review --base main
 $claude adversarial-review challenge the state management assumptions
 $claude status
@@ -165,6 +170,16 @@ JSON output, but the human view shows the useful signal: whether Claude is
 active, the last meaningful line, how long output has been stale, and what to
 do next.
 
+When Claude stops at a visible approval prompt (for example `Do you want to
+proceed?`), the monitor reports `awaiting_permission` with the pending prompt
+and the next action instead of a plain `active` state. When background worktree
+isolation rejects Claude's writes, the monitor reports `needs_isolation`. The
+companion never auto-approves prompts and never marks a blocked job completed; a
+job waiting on permission stays `running` until a human or the orchestrator acts
+on it. There is no automatic wakeup: someone must answer the prompt, cancel the
+job, or relaunch it. `status` and `result` include the stored permission config
+so Codex can decide whether an approval is authorized.
+
 `status` and `monitor` save the latest useful Claude output, so `result` can
 recover it later even if you cancel the job or Claude's live log socket is gone.
 
@@ -172,6 +187,31 @@ Foreground `advise` and `rescue` calls have a two-minute timeout. If one times
 out, the companion records the timed-out attempt and starts one background job
 for the same prompt. Use `--background` up front for real advisor work; use
 `--no-background-fallback` only when you want a timeout to fail fast.
+
+## Explicit Permissions
+
+Read-only routes cannot gain `Edit`, `Write`, or `Bash`. Explicit permission
+grants require `--write`:
+
+```text
+$claude do --write --permission-mode acceptEdits --add-dir /path/to/dir --allowed-tools 'Bash(npm test)' <prepared task>
+```
+
+- `--permission-mode` accepts `default`, `acceptEdits`, or `dontAsk`.
+  `bypassPermissions` is rejected.
+- `--add-dir`, `--allowed-tools`, and `--disallowed-tools` are repeatable. Each
+  value is passed to Claude Code as its own argument, so paths with spaces and
+  rules such as `Bash(npm test)` arrive intact. Grants allow only what you
+  supply; they are not a blanket bypass.
+- The same options apply to foreground runs, background runs, and the timeout
+  fallback. `--cwd <dir>` runs the task in an explicitly authorized working
+  directory.
+- The sanitized permission config is stored in job metadata and reused verbatim
+  when you resume a job with `--resume`. Resume never escalates permissions
+  implicitly; read-only resumes of write jobs are refused.
+
+Default write runs stay conservative: `--write` alone uses permission mode
+`default` with no extra grants.
 
 ## Safety
 

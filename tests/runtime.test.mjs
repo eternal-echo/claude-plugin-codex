@@ -9,6 +9,8 @@ import {
   buildClaudeArgs,
   buildReviewPrompt,
   loadState,
+  normalizePermissionConfig,
+  normalizePermissionMode,
   parseBackgroundLaunch,
   parseClaudeJsonResult,
   resolveStateDir,
@@ -229,4 +231,170 @@ test("buildReviewPrompt includes git context and JSON-only contract", () => {
 test("loadState tolerates missing state files", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-plugin-codex-test-"));
   assert.deepEqual(loadState(dir), { version: 1, jobs: [], capabilities: null });
+});
+
+test("normalizePermissionMode accepts mixed case and rejects unsupported modes", () => {
+  assert.equal(normalizePermissionMode("acceptEdits"), "acceptEdits");
+  assert.equal(normalizePermissionMode("AcceptEdits"), "acceptEdits");
+  assert.equal(normalizePermissionMode("ACCEPTEDITS"), "acceptEdits");
+  assert.equal(normalizePermissionMode("DEFAULT"), "default");
+  assert.equal(normalizePermissionMode("DontAsk"), "dontAsk");
+  assert.throws(() => normalizePermissionMode("bypassPermissions"), /bypassPermissions/);
+  assert.throws(() => normalizePermissionMode("BypassPermissions"), /bypassPermissions/);
+  assert.throws(() => normalizePermissionMode("plan"), /default, acceptEdits, dontAsk/);
+  assert.throws(() => normalizePermissionMode("auto"), /default, acceptEdits, dontAsk/);
+  assert.throws(() => normalizePermissionMode("bogus"), /default, acceptEdits, dontAsk/);
+});
+
+test("normalizePermissionConfig requires --write for explicit permission options", () => {
+  assert.equal(normalizePermissionConfig({ write: false }), null);
+  assert.throws(() => normalizePermissionConfig({ write: false, mode: "acceptEdits" }), /--write/);
+  assert.throws(
+    () => normalizePermissionConfig({ write: false, allowedTools: ["Bash(npm test)"] }),
+    /--write/
+  );
+  assert.throws(
+    () => normalizePermissionConfig({ write: false, addDirs: ["/tmp"] }),
+    /--write/
+  );
+  assert.throws(
+    () => normalizePermissionConfig({ write: false, disallowedTools: ["WebSearch"] }),
+    /--write/
+  );
+});
+
+test("normalizePermissionConfig resolves directories, dedupes, and rejects conflicts", () => {
+  const config = normalizePermissionConfig(
+    {
+      write: true,
+      mode: "acceptEdits",
+      addDirs: ["one dir", "/tmp/second", "/tmp/second"],
+      allowedTools: ["Bash(npm test)", "Bash(npm test)"],
+      disallowedTools: ["WebSearch"]
+    },
+    "/tmp/base"
+  );
+  assert.deepEqual(config, {
+    mode: "acceptEdits",
+    addDirs: ["/tmp/base/one dir", "/tmp/second"],
+    allowedTools: ["Bash(npm test)"],
+    disallowedTools: ["WebSearch"]
+  });
+  assert.throws(
+    () =>
+      normalizePermissionConfig({
+        write: true,
+        allowedTools: ["Bash(npm test)"],
+        disallowedTools: ["Bash(npm test)"]
+      }),
+    /Conflicting/
+  );
+  assert.throws(() => normalizePermissionConfig({ write: true, addDirs: ["   "] }), /--add-dir/);
+  assert.throws(() => normalizePermissionConfig({ write: true, allowedTools: ["  "] }), /--allowed-tools/);
+  assert.throws(
+    () => normalizePermissionConfig({ write: true, disallowedTools: [""] }),
+    /--disallowed-tools/
+  );
+});
+
+test("buildClaudeArgs passes explicit permission config as separate argv values", () => {
+  const args = buildClaudeArgs({
+    mode: "do",
+    prompt: "run the task",
+    write: true,
+    permissionConfig: {
+      mode: "acceptEdits",
+      addDirs: ["/tmp/one dir", "/tmp/second"],
+      allowedTools: ["Bash(npm test)"],
+      disallowedTools: ["WebSearch"]
+    }
+  });
+
+  assert.deepEqual(args.slice(args.indexOf("--permission-mode"), args.indexOf("--permission-mode") + 2), [
+    "--permission-mode",
+    "acceptEdits"
+  ]);
+  const addDirs = args.filter((value, index) => args[index - 1] === "--add-dir");
+  assert.deepEqual(addDirs, ["/tmp/one dir", "/tmp/second"]);
+  assert.deepEqual(args.slice(args.indexOf("--allowed-tools"), args.indexOf("--allowed-tools") + 2), [
+    "--allowed-tools",
+    "Bash(npm test)"
+  ]);
+  assert.deepEqual(
+    args.slice(args.indexOf("--disallowed-tools"), args.indexOf("--disallowed-tools") + 2),
+    ["--disallowed-tools", "WebSearch"]
+  );
+  assert.ok(args.includes("--strict-mcp-config"));
+  assert.ok(args.includes("--no-chrome"));
+});
+
+test("buildClaudeArgs keeps conservative default write mode without explicit config", () => {
+  const args = buildClaudeArgs({ mode: "do", prompt: "run the task", write: true });
+
+  assert.deepEqual(args.slice(args.indexOf("--permission-mode"), args.indexOf("--permission-mode") + 2), [
+    "--permission-mode",
+    "default"
+  ]);
+  assert.equal(args.includes("--add-dir"), false);
+  assert.equal(args.includes("--allowed-tools"), false);
+  assert.equal(args.includes("--disallowed-tools"), false);
+});
+
+test("buildClaudeArgs rejects grants on read-only runs and bypassPermissions", () => {
+  assert.throws(
+    () => buildClaudeArgs({ mode: "do", prompt: "run the task", permissionConfig: { mode: "acceptEdits" } }),
+    /--write/
+  );
+  assert.throws(
+    () =>
+      buildClaudeArgs({
+        mode: "do",
+        prompt: "run the task",
+        write: true,
+        permissionConfig: { mode: "bypassPermissions" }
+      }),
+    /bypassPermissions/
+  );
+});
+
+test("buildBackgroundArgs applies the same explicit permission config", () => {
+  const args = buildBackgroundArgs({
+    prompt: "run the task",
+    name: "codex-do",
+    write: true,
+    permissionConfig: {
+      mode: "acceptEdits",
+      addDirs: ["/tmp/one dir"],
+      allowedTools: ["Bash(npm test)"],
+      disallowedTools: []
+    }
+  });
+
+  assert.deepEqual(args.slice(args.indexOf("--permission-mode"), args.indexOf("--permission-mode") + 2), [
+    "--permission-mode",
+    "acceptEdits"
+  ]);
+  assert.deepEqual(args.slice(args.indexOf("--add-dir"), args.indexOf("--add-dir") + 2), [
+    "--add-dir",
+    "/tmp/one dir"
+  ]);
+  assert.deepEqual(args.slice(args.indexOf("--allowed-tools"), args.indexOf("--allowed-tools") + 2), [
+    "--allowed-tools",
+    "Bash(npm test)"
+  ]);
+  assert.throws(
+    () => buildBackgroundArgs({ prompt: "run the task", name: "codex-do", permissionConfig: { mode: "dontAsk" } }),
+    /--write/
+  );
+});
+
+test("buildBackgroundArgs keeps write conservative by default", () => {
+  const args = buildBackgroundArgs({ prompt: "run the task", name: "codex-do", write: true });
+
+  assert.deepEqual(args.slice(args.indexOf("--permission-mode"), args.indexOf("--permission-mode") + 2), [
+    "--permission-mode",
+    "default"
+  ]);
+  assert.equal(args.includes("--add-dir"), false);
+  assert.equal(args.includes("--allowed-tools"), false);
 });
