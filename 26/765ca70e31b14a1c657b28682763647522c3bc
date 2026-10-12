@@ -1,0 +1,74 @@
+tests/commands.test.mjs
+  s_c509ef4ee8cf22::t_f7fc2120ae8308 587-588
+  s_c509ef4ee8cf22::t_79235c3b87c7b4 979-980
+  s_c509ef4ee8cf22::t_81ace1bee3c522 557-558
+  s_c509ef4ee8cf22::t_0462ef5fc061f3 730-978,981-1327
+README.md
+  s_c509ef4ee8cf22::t_8057904a860b49 8,11-13
+  s_c509ef4ee8cf22::t_eff87533b53daf 173-182,191-214
+  s_c509ef4ee8cf22::t_00194dc8fb1103 142
+  s_4636ca27812d80::t_37a31b7b707050 14,215
+tests/validate-plugin.mjs
+  s_4636ca27812d80::t_0eda4660262e10 16-21
+  s_c509ef4ee8cf22::t_ac8effaf28b72a 45-51,60-65
+.claude/settings.json
+  s_c509ef4ee8cf22::t_e272c2c9cdab48 1-5
+plugins/claude-code-advisor/scripts/claude-companion.mjs
+  s_c509ef4ee8cf22::t_20e65a3644c361 541-545,554-555
+  s_c509ef4ee8cf22::t_f198344915bb7a 461
+  s_c509ef4ee8cf22::t_ccf5118003e5fe 979-983
+  s_c509ef4ee8cf22::t_7a4bf0da700ad6 224-250
+  s_c509ef4ee8cf22::t_820b3ab973e1ad 37-74,85,89-100,102
+  s_c509ef4ee8cf22::t_43ac2ea8cc479d 475-483,495-496
+  s_c509ef4ee8cf22::t_6b2a307f189bfe 707-708,713,717-724
+  s_c509ef4ee8cf22::t_594b8a01c21a64 580-590,592,594,604
+  s_c509ef4ee8cf22::t_79bce643c78164 623-636,639
+  s_c509ef4ee8cf22::t_238d028965c484 850-866,875-894
+  s_c509ef4ee8cf22::t_91ed3151feb127 14
+  s_c509ef4ee8cf22::t_4f8be8392c581d 757-759,762-769,774-777,791-806,812-816
+  s_c509ef4ee8cf22::t_8ec023ad62f309 996-998,1005-1013
+  s_c509ef4ee8cf22::t_2f20e709c32144 326-342,344
+plugins/claude-code-advisor/scripts/lib/runtime.mjs
+  s_c509ef4ee8cf22::t_a87e20657af99b 19-117
+  s_c509ef4ee8cf22::t_8f207b5e6b129d 250-251,279-280,298-299,318-320
+tests/e2e-codex-skill.mjs
+  s_4636ca27812d80::t_9f3655ec580496 50-55
+tests/runtime.test.mjs
+  s_c509ef4ee8cf22::t_e9a5f4d22f78e6 235-400
+  s_c509ef4ee8cf22::t_2031be665cbebc 12-13
+plugins/claude-code-advisor/.codex-plugin/plugin.json
+  s_4636ca27812d80::t_83bad66931bde6 8-9,31-33
+  s_c509ef4ee8cf22::t_4622bb104cd241 3
+package.json
+  s_c509ef4ee8cf22::t_465ccf298c80e4 3
+plugins/claude-code-advisor/skills/claude/SKILL.md
+  s_c509ef4ee8cf22::t_9d0c50e942dfee 25-26
+  s_c509ef4ee8cf22::t_4289d2c33d4840 65-80
+  s_c509ef4ee8cf22::t_d60510168add70 132-134
+.gitignore
+  s_4636ca27812d80::t_65b528d3731d5b 4
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "26765ca70e31b14a1c657b28682763647522c3bc",
+  "prompts": {},
+  "sessions": {
+    "s_4636ca27812d80": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a124c4-c711-7831-95f1-bc72ee725df7",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "henry.yuan <henry.yuan2@nio.com>"
+    },
+    "s_c509ef4ee8cf22": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ef9ccbb4-ebb6-444c-84cb-cf1fc0f06f73",
+        "model": "GLM-5.3-Tencent"
+      },
+      "human_author": "henry.yuan <henry.yuan2@nio.com>"
+    }
+  }
+}
